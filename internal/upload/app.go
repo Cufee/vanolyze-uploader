@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -81,13 +82,14 @@ type Store interface {
 
 // App runs scans.
 type App struct {
-	cfg     config.Upload
-	store   Store
-	connect func(context.Context) (Session, error)
-	state   *State
-	log     *slog.Logger
-	status  *Status
-	now     func() time.Time
+	cfg           config.Upload
+	store         Store
+	connect       func(context.Context) (Session, error)
+	state         *State
+	log           *slog.Logger
+	status        *Status
+	now           func() time.Time
+	matchActivity func(context.Context) (riot.MatchState, error)
 	// demos is the game's replay folder; files there are imported and removed.
 	demos           string
 	maxReplayBytes  int64
@@ -169,6 +171,9 @@ func limited(err error) bool {
 // Scan imports the Demos folder, then finds and uploads the replays policy.go
 // selects, and refreshes account sidecars.
 func (a *App) Scan(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.Remove(a.partPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -204,7 +209,12 @@ func (a *App) Scan(ctx context.Context) error {
 
 	defer session.Close()
 
+	// A paused scan must be able to pick up its friends again on resume.
+	players := maps.Clone(a.state.Players)
 	err = a.scanRiot(ctx, session, idx)
+	if errors.Is(context.Cause(ctx), errMatchPaused) {
+		a.state.Players = players
+	}
 
 	a.state.prune(a.now())
 
@@ -393,6 +403,9 @@ func (a *App) collect(ctx context.Context, s Session, players []string, idx *ind
 	for _, p := range picks {
 		if p.lobby {
 			pass, err := a.judgeLobby(ctx, s, p.match, bar, &budget)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
 			if limited(err) {
 				return nil, err
 			}
@@ -505,6 +518,9 @@ func (a *App) judgeLobby(ctx context.Context, s Session, match riot.Match, bar i
 			}
 
 			ranks, err := a.ranks(ctx, s, puuid, otherRankAge)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return false, ctxErr
+			}
 			if limited(err) {
 				return false, err
 			}
@@ -634,6 +650,9 @@ func (a *App) fileURLs(ctx context.Context, s Session, batch []pick) (map[string
 // transfer downloads one replay, checks it against Riot's checksum and
 // stores it under its player's folder.
 func (a *App) transfer(ctx context.Context, s Session, p pick, files fileURLs, idx *index) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	a.status.activity("Downloading " + p.match.ID[:8])
 
 	summary, err := s.ReadSummary(ctx, files.summary)
@@ -703,9 +722,15 @@ func (a *App) put(ctx context.Context, key string, f *os.File, d digest, metadat
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	err := a.store.Create(ctx, key, f, d.Size, d.MD5, metadata)
 	if err != nil && !errors.Is(err, source.ErrExists) {
+		if ctx.Err() != nil {
+			return err
+		}
 		// A stored object can lose its response; the HEAD below finds it.
 		if object, headErr := a.store.Head(ctx, key); headErr != nil || !d.matches(object) {
 			return err
@@ -780,6 +805,9 @@ func (a *App) writeSidecars(ctx context.Context, s Session, idx *index, names ma
 		}
 
 		key := keyPrefix + puuid + "/account.json"
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := a.store.Put(ctx, key, data, "application/json"); err != nil {
 			return &storeError{
 				err: err,

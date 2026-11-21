@@ -16,6 +16,7 @@ type Snapshot struct {
 	Server     string
 	LogPath    string
 	Busy       bool
+	Paused     bool
 	Uploaded   int
 	Stored     int
 	LastUpload time.Time
@@ -28,6 +29,7 @@ type Snapshot struct {
 type Status struct {
 	mu      sync.RWMutex
 	value   Snapshot
+	pause   string
 	changed chan struct{}
 }
 
@@ -50,7 +52,13 @@ func (s *Status) Snapshot() Snapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.value
+	v := s.value
+	if s.pause != "" {
+		v.Activity = "Paused: " + s.pause
+		v.Color = "amber"
+		v.Paused = true
+	}
+	return v
 }
 
 func (s *Status) update(change func(*Snapshot)) {
@@ -61,7 +69,20 @@ func (s *Status) update(change func(*Snapshot)) {
 	s.mu.Lock()
 	change(&s.value)
 	s.mu.Unlock()
+	s.notify()
+}
 
+func (s *Status) paused(reason string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.pause = reason
+	s.mu.Unlock()
+	s.notify()
+}
+
+func (s *Status) notify() {
 	select {
 	case s.changed <- struct{}{}:
 	default:

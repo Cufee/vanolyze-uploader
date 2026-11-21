@@ -14,46 +14,77 @@ import (
 // Failed scans retry with backoff, and a Riot rate limit waits out its
 // Retry-After.
 func (a *App) Run(ctx context.Context, scanNow, updatePending <-chan struct{}) error {
+	return a.run(ctx, scanNow, updatePending, false)
+}
+
+func (a *App) run(ctx context.Context, scanNow, updatePending <-chan struct{}, once bool) error {
+	var permits chan context.Context
+	if a.matchActivity != nil {
+		permits = make(chan context.Context)
+		watchCtx, stop := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			a.watchMatches(watchCtx, permits)
+		}()
+		defer func() {
+			stop()
+			<-done
+		}()
+	}
+
 	backoff := time.Minute
 
-	for {
+	for ctx.Err() == nil {
 		select {
 		case <-updatePending:
 			return errUpdatePending
 		default:
 		}
 
-		delay, stopped := a.scanOnce(ctx, &backoff)
-		if stopped {
-			a.log.Info("stopped")
-
-			return nil
+		scanCtx := ctx
+		if permits != nil {
+			select {
+			case scanCtx = <-permits:
+			case <-updatePending:
+				return errUpdatePending
+			case <-ctx.Done():
+				continue
+			}
 		}
 
-		timer := time.NewTimer(delay)
+		err := a.Scan(scanCtx)
+		if errors.Is(context.Cause(scanCtx), errMatchPaused) {
+			continue
+		}
+		if once {
+			return err
+		}
+		if ctx.Err() != nil {
+			break
+		}
 
+		timer := time.NewTimer(a.scanDelay(err, &backoff))
 		select {
 		case <-updatePending:
 			timer.Stop()
 			return errUpdatePending
-		case <-ctx.Done():
-			timer.Stop()
+		case <-scanCtx.Done():
 		case <-scanNow:
-			timer.Stop()
 			a.log.Info("scan requested")
 		case <-timer.C:
 		}
+		timer.Stop()
 	}
+	if once {
+		return ctx.Err()
+	}
+	a.log.Info("stopped")
+	return nil
 }
 
-// scanOnce scans and returns the wait before the next scan, or stopped when
-// ctx ended.
-func (a *App) scanOnce(ctx context.Context, backoff *time.Duration) (time.Duration, bool) {
-	err := a.Scan(ctx)
-	if ctx.Err() != nil {
-		return 0, true
-	}
-
+// scanDelay records the result and returns the wait before the next scan.
+func (a *App) scanDelay(err error, backoff *time.Duration) time.Duration {
 	delay := a.cfg.ScanInterval
 
 	var (
@@ -88,7 +119,7 @@ func (a *App) scanOnce(ctx context.Context, backoff *time.Duration) (time.Durati
 
 	a.status.waiting(time.Now().Add(delay), err, errorText)
 
-	return delay, false
+	return delay
 }
 
 // RotatingLog is a log file bounded to 2 MiB plus one rotated file.

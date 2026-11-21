@@ -147,15 +147,26 @@ func (l *local) token(ctx context.Context) (token, error) {
 	return t, nil
 }
 
+type productSession struct {
+	ProductID  string `json:"productId"`
+	ExitReason string `json:"exitReason"`
+	Launch     struct {
+		Arguments []string `json:"arguments"`
+	} `json:"launchConfiguration"`
+}
+
+func (l *local) productSessions(ctx context.Context) (map[string]productSession, error) {
+	var sessions map[string]productSession
+	if err := l.get(ctx, "/product-session/v1/external-sessions", &sessions); err != nil {
+		return nil, err
+	}
+	return sessions, nil
+}
+
 // deployment reads VALORANT's region from its launch arguments.
 func (l *local) deployment(ctx context.Context) (string, error) {
-	var sessions map[string]struct {
-		ProductID string `json:"productId"`
-		Launch    struct {
-			Arguments []string `json:"arguments"`
-		} `json:"launchConfiguration"`
-	}
-	if err := l.get(ctx, "/product-session/v1/external-sessions", &sessions); err != nil {
+	sessions, err := l.productSessions(ctx)
+	if err != nil {
 		return "", err
 	}
 

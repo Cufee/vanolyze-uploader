@@ -114,6 +114,9 @@ func (a *App) importDemo(ctx context.Context, path, id string, before os.FileInf
 	}
 
 	// Check again before deleting: the game may have rewritten the file meanwhile.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	after, err := digestFile(f)
 	if err != nil {
 		return err

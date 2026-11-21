@@ -302,12 +302,15 @@ func runConfigured(
 	if opts.DemosDir != "" {
 		app.demos = opts.DemosDir
 	}
+	if runtime.GOOS == "windows" {
+		app.matchActivity = riot.MatchActivity
+	}
 
 	logger.Info("uploader started", "scan_interval", cfg.ScanInterval.String(), "friends", cfg.Friends,
 		"friend_interval", cfg.FriendInterval.String())
 
 	if opts.Once {
-		return app.Scan(ctx)
+		return app.run(ctx, nil, nil, true)
 	}
 
 	if err := announceUpdateReady(); err != nil {

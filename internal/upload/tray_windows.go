@@ -100,6 +100,9 @@ func runTray(
 			if !v.NextScan.IsZero() {
 				next = v.NextScan.Local().Format("15:04:05")
 			}
+			if v.Paused {
+				next = "after pause"
+			}
 
 			nextScan.SetTitle("Next scan: " + next)
 
@@ -110,7 +113,7 @@ func runTray(
 
 			lastError.SetTitle("Error: " + errText)
 
-			if v.Busy {
+			if v.Busy || v.Paused {
 				scan.Disable()
 			} else {
 				scan.Enable()
