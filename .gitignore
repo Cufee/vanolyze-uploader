@@ -1,0 +1,8 @@
+/dist/
+/data/
+config.json
+.env
+.env.*
+*.key
+*.exe
+/vanolyze-uploader

@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: uploader-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    environment: release
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Validate version
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tags must be vMAJOR.MINOR.PATCH." >&2
+            exit 1
+          fi
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+        with:
+          enable_kvm: false
+      - name: Test and build both binaries
+        run: env -u GOROOT nix develop -c make check build VERSION="$GITHUB_REF_NAME" SEQUENCE="$GITHUB_RUN_NUMBER"
+      - name: Generate manifest
+        shell: bash
+        run: |
+          nix develop -c bash -euo pipefail <<'EOF'
+          windows=vanolyze-uploader-windows-amd64.exe
+          linux=vanolyze-uploader-linux-amd64
+          jq -n \
+            --arg version "$GITHUB_REF_NAME" --argjson sequence "$GITHUB_RUN_NUMBER" \
+            --arg windows "$windows" --arg linux "$linux" \
+            --argjson windowsSize "$(stat -c %s "dist/$windows")" \
+            --argjson linuxSize "$(stat -c %s "dist/$linux")" \
+            --arg windowsHash "$(sha256sum "dist/$windows" | cut -d ' ' -f 1)" \
+            --arg linuxHash "$(sha256sum "dist/$linux" | cut -d ' ' -f 1)" \
+            '{schema: 1, product: "vanolyze-uploader", version: $version, sequence: $sequence,
+              assets: {
+                "windows/amd64": {name: $windows, size: $windowsSize, sha256: $windowsHash},
+                "linux/amd64": {name: $linux, size: $linuxSize, sha256: $linuxHash}
+              }}' > dist/manifest.json
+          EOF
+      - name: Sign and verify release assets
+        shell: bash
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          nix develop -c bash -euo pipefail <<'EOF'
+          key=$(dist/vanolyze-uploader-linux-amd64 -release-key)
+          : "${MINISIGN_SECRET_KEY:?Set the protected minisign key file contents}"
+          : "${MINISIGN_PASSWORD:?Set the minisign key password}"
+          assets=(dist/manifest.json dist/vanolyze-uploader-windows-amd64.exe dist/vanolyze-uploader-linux-amd64)
+          minisign -S -s <(printf '%s\n' "$MINISIGN_SECRET_KEY") -m "${assets[@]}" <<< "$MINISIGN_PASSWORD"
+          for asset in "${assets[@]}"; do
+            minisign -Vm "$asset" -P "$key"
+          done
+          EOF
+      - name: Publish signed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: nix develop -c gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --latest dist/manifest.json dist/manifest.json.minisig dist/vanolyze-uploader-windows-amd64.exe dist/vanolyze-uploader-windows-amd64.exe.minisig dist/vanolyze-uploader-linux-amd64 dist/vanolyze-uploader-linux-amd64.minisig
